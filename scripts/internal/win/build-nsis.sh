@@ -449,6 +449,15 @@ verify_windows_better_sqlite3_runtime() {
   local node_runtime_dir
   node_runtime_dir="$(to_node_readable_path "$runtime_dir")"
 
+  if [ "$(node -p 'process.platform')" != "win32" ]; then
+    if [ "${MEMMY_SKIP_WINDOWS_NATIVE_SMOKE:-}" = "1" ]; then
+      package_log "SKIP: Windows better-sqlite3 execution smoke is unavailable on this host; PE/x64 validation remains enabled."
+      return 0
+    fi
+    echo "Windows better-sqlite3 execution smoke requires a Windows host. Set MEMMY_SKIP_WINDOWS_NATIVE_SMOKE=1 to cross-package and defer runtime validation." >&2
+    return 1
+  fi
+
   require_packaged_runtime_file "$electron_executable"
   MEMMY_BETTER_SQLITE_RUNTIME_DIR="$node_runtime_dir" \
     ELECTRON_RUN_AS_NODE=1 \
@@ -468,6 +477,20 @@ verify_windows_better_sqlite3_runtime() {
         database.close();
       }
     '
+}
+
+verify_windows_computer_use_binary() {
+  local binary="$1"
+  verify_windows_x64_native_module "$binary" "Open Computer Use executable"
+
+  if [ "$(node -p 'process.platform')" = "win32" ]; then
+    node "$ROOT_DIR/scripts/internal/shared/check-open-computer-use.mjs" "$binary"
+  elif [ "${MEMMY_SKIP_WINDOWS_NATIVE_SMOKE:-}" = "1" ]; then
+    package_log "SKIP: Open Computer Use Windows runtime smoke is unavailable on this host; PE/x64 validation passed."
+  else
+    echo "Open Computer Use Windows runtime smoke requires a Windows host. Set MEMMY_SKIP_WINDOWS_NATIVE_SMOKE=1 to cross-package and defer runtime validation." >&2
+    return 1
+  fi
 }
 
 verify_packaged_file_matches_runtime() {
@@ -535,7 +558,7 @@ verify_windows_agent_native_artifacts() {
 
   require_packaged_runtime_file "$RUNTIME_DIR/memmy-agent/node_modules/@memmy/local-api-contracts/dist/index.js"
   require_packaged_runtime_file "$RUNTIME_DIR/memmy-agent/node_modules/open-computer-use/dist/windows/amd64/open-computer-use.exe"
-  node "$ROOT_DIR/scripts/internal/shared/check-open-computer-use.mjs" \
+  verify_windows_computer_use_binary \
     "$RUNTIME_DIR/memmy-agent/node_modules/open-computer-use/dist/windows/amd64/open-computer-use.exe"
   if [ -L "$RUNTIME_DIR/memmy-agent/node_modules/@memmy/local-api-contracts" ]; then
     echo "Packaged local API contracts must not be a symbolic link." >&2
@@ -607,25 +630,25 @@ verify_packaged_windows_unpacked_artifacts() {
     exit 1
   fi
   verify_windows_x64_native_module \
-    "$unpacked_runtime/memory/node_modules/better-sqlite3/build/Release/better_sqlite3.node" \
+    "$packaged_memory_runtime/node_modules/better-sqlite3/build/Release/better_sqlite3.node" \
     "packaged Memory better-sqlite3"
   verify_windows_x64_native_module \
     "$unpacked_runtime/memmy-agent/node_modules/better-sqlite3/build/Release/better_sqlite3.node" \
     "packaged memmy-agent better-sqlite3"
   verify_packaged_file_matches_runtime \
     "$RUNTIME_DIR/memory/node_modules/better-sqlite3/build/Release/better_sqlite3.node" \
-    "$unpacked_runtime/memory/node_modules/better-sqlite3/build/Release/better_sqlite3.node" \
+    "$packaged_memory_runtime/node_modules/better-sqlite3/build/Release/better_sqlite3.node" \
     "Memory better-sqlite3 module"
   verify_packaged_file_matches_runtime \
     "$RUNTIME_DIR/memmy-agent/node_modules/better-sqlite3/build/Release/better_sqlite3.node" \
     "$unpacked_runtime/memmy-agent/node_modules/better-sqlite3/build/Release/better_sqlite3.node" \
     "memmy-agent better-sqlite3 module"
-  require_packaged_runtime_file "$unpacked_runtime/memory/node_modules/onnxruntime-node/bin/napi-v3/win32/x64/onnxruntime.dll"
-  require_packaged_runtime_glob "$unpacked_runtime/memory/node_modules/onnxruntime-node/bin/napi-v3/win32/x64/*.dll"
-  require_packaged_runtime_glob "$unpacked_runtime/memory/node_modules/@img/sharp-win32-x64/lib/libvips*.dll"
+  require_packaged_runtime_file "$packaged_memory_runtime/node_modules/onnxruntime-node/bin/napi-v3/win32/x64/onnxruntime.dll"
+  require_packaged_runtime_glob "$packaged_memory_runtime/node_modules/onnxruntime-node/bin/napi-v3/win32/x64/*.dll"
+  require_packaged_runtime_glob "$packaged_memory_runtime/node_modules/@img/sharp-win32-x64/lib/libvips*.dll"
   require_packaged_runtime_file "$unpacked_runtime/memmy-agent/node_modules/@memmy/migrations/dist/index.js"
   require_packaged_runtime_file "$unpacked_runtime/memmy-agent/node_modules/open-computer-use/dist/windows/amd64/open-computer-use.exe"
-  node "$ROOT_DIR/scripts/internal/shared/check-open-computer-use.mjs" \
+  verify_windows_computer_use_binary \
     "$unpacked_runtime/memmy-agent/node_modules/open-computer-use/dist/windows/amd64/open-computer-use.exe"
   require_packaged_runtime_file "$unpacked_runtime/memmy-agent/node_modules/@memmy/migrations/dist/state-store.js"
   verify_migration_state_compatibility_module \
@@ -655,6 +678,7 @@ verify_packaged_runtime_config_boundary() {
     --asar "$(to_node_readable_path "$asar_file")" \
     --expected "$DESKTOP_VERSION" \
     --expected-memory "$MEMORY_VERSION" \
+    --memory-runtime-root "$(to_node_readable_path "$resources_root/memory-runtime")" \
     --platform win32 \
     --arch "$PACKAGE_ARCH"
 }

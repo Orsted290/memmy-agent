@@ -1,5 +1,7 @@
 #!/usr/bin/env node
 
+import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { join } from "node:path";
 import { extractFile, listPackage } from "@electron/asar";
 
 const semanticVersionPattern = /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/;
@@ -13,6 +15,7 @@ const {
   asarPath,
   expected: expectedDesktop,
   expectedMemory,
+  memoryRuntimeRoot,
   platform,
   arch,
 } = parseArgs(process.argv.slice(2));
@@ -34,11 +37,6 @@ const requiredFiles = [
 ];
 if (platform === "win32") {
   requiredFiles.push(
-    "dist/runtime/memory/package.json",
-    "dist/runtime/memory/node_modules/@memmy/agent-source-core/package.json",
-    "dist/runtime/memory/node_modules/@memmy/agent-source-core/dist/src/index.js",
-    `dist/runtime/memory/node_modules/onnxruntime-node/bin/napi-v3/${platform}/${arch}/onnxruntime_binding.node`,
-    `dist/runtime/memory/node_modules/onnxruntime-node/bin/napi-v3/${platform}/${arch}/onnxruntime.dll`,
     "dist/runtime/memmy-agent/dist/main.js.map",
   );
 }
@@ -48,13 +46,7 @@ for (const file of requiredFiles) {
 }
 
 if (platform === "win32") {
-  const onnxRuntimePrefix = "dist/runtime/memory/node_modules/onnxruntime-node/bin/napi-v3/";
-  const targetOnnxRuntimePrefix = `${onnxRuntimePrefix}${platform}/${arch}/`;
-  if (entries.some((entry) => entry.startsWith(onnxRuntimePrefix)
-    && !entry.startsWith(targetOnnxRuntimePrefix)
-    && !targetOnnxRuntimePrefix.startsWith(`${entry.replace(/\/+$/u, "")}/`))) {
-    throw new Error("Packaged ASAR contains an incompatible onnxruntime-node platform");
-  }
+  verifyExternalMemoryRuntime(memoryRuntimeRoot, expectedMemory, platform, arch);
 
   const optionalPeerToolchainPattern = /^dist\/runtime\/memmy-agent\/node_modules\/(?:vitest|vite|rolldown)(?:\/|$)|^dist\/runtime\/memmy-agent\/node_modules\/@vitest(?:\/|$)|^dist\/runtime\/memmy-agent\/node_modules\/@rolldown\/binding-[^/]+(?:\/|$)/u;
   if (entries.some((entry) => optionalPeerToolchainPattern.test(entry))) {
@@ -75,12 +67,6 @@ const versionedFiles = [
   ["dist/runtime/memmy-agent/package.json", false, expectedDesktop],
   ["dist/runtime/memmy-agent/package-lock.json", true, expectedDesktop],
 ];
-if (platform === "win32") {
-  versionedFiles.splice(1, 0,
-    ["dist/runtime/memory/package.json", false, expectedMemory],
-    ["dist/runtime/memory/package-lock.json", true, expectedMemory],
-  );
-}
 for (const [file, lock, expectedVersion] of versionedFiles) {
   // electron-builder excludes npm lockfiles by default. The staged-runtime
   // version guard validates them before packaging; re-check any that are kept.
@@ -106,6 +92,44 @@ function readAsarJson(path, file) {
   }
 }
 
+function verifyExternalMemoryRuntime(root, expectedVersion, targetPlatform, targetArch) {
+  const packageJsonPath = join(root, "package.json");
+  const lockPath = join(root, "package-lock.json");
+  const packageJson = readExternalJson(packageJsonPath);
+  const lock = readExternalJson(lockPath);
+
+  if (packageJson.version !== expectedVersion) {
+    throw new Error(`Packaged Memory runtime version does not match: ${packageJsonPath}`);
+  }
+  if (lock.version !== expectedVersion || lock.packages?.[""]?.version !== expectedVersion) {
+    throw new Error(`Packaged Memory runtime lock version does not match: ${lockPath}`);
+  }
+
+  const napiRoot = join(root, "node_modules/onnxruntime-node/bin/napi-v3");
+  const platformEntries = readdirSync(napiRoot, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => entry.name);
+  if (platformEntries.some((entry) => entry !== targetPlatform)) {
+    throw new Error(`Packaged Memory runtime contains an incompatible onnxruntime-node platform: ${platformEntries.join(", ")}`);
+  }
+  const archRoot = join(napiRoot, targetPlatform);
+  const archEntries = readdirSync(archRoot, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => entry.name);
+  if (!archEntries.includes(targetArch) || archEntries.some((entry) => entry !== targetArch)) {
+    throw new Error(`Packaged Memory runtime does not contain only the target onnxruntime-node architecture: ${archEntries.join(", ")}`);
+  }
+}
+
+function readExternalJson(path) {
+  try {
+    if (!existsSync(path)) throw new Error("missing");
+    return JSON.parse(readFileSync(path, "utf8"));
+  } catch {
+    throw new Error(`Packaged runtime JSON is missing or invalid: ${path}`);
+  }
+}
+
 function isFirstPartyPackageFile(entry) {
   const marker = "/node_modules/";
   const owner = entry.slice(entry.lastIndexOf(marker) + marker.length);
@@ -118,10 +142,10 @@ function parseArgs(args) {
     const flag = args[index];
     const value = args[index + 1];
     if (!flag?.startsWith("--") || value === undefined) {
-      throw new Error("Usage: verify-packaged-asar.mjs --asar <path> --expected <version> [--expected-memory <version>] --platform <platform> --arch <arch>");
+      throw new Error("Usage: verify-packaged-asar.mjs --asar <path> --expected <version> [--expected-memory <version> --memory-runtime-root <path>] --platform <platform> --arch <arch>");
     }
     const key = flag.slice(2);
-    if (!new Set(["asar", "expected", "expected-memory", "platform", "arch"]).has(key)
+    if (!new Set(["asar", "expected", "expected-memory", "memory-runtime-root", "platform", "arch"]).has(key)
       || Object.hasOwn(parsed, key)) {
       throw new Error(`Unknown or duplicate option: ${flag}`);
     }
@@ -137,16 +161,18 @@ function parseArgs(args) {
     throw new Error(`Unsupported packaged architecture: ${parsed.arch}`);
   }
   const hasExpectedMemory = Object.hasOwn(parsed, "expected-memory");
-  if (parsed.platform === "win32" && !hasExpectedMemory) {
-    throw new Error("--expected-memory is required for win32 packages");
+  const hasMemoryRuntimeRoot = Object.hasOwn(parsed, "memory-runtime-root");
+  if (parsed.platform === "win32" && (!hasExpectedMemory || !hasMemoryRuntimeRoot)) {
+    throw new Error("--expected-memory and --memory-runtime-root are required for win32 packages");
   }
-  if (parsed.platform !== "win32" && hasExpectedMemory) {
-    throw new Error("--expected-memory is only supported for win32 packages");
+  if (parsed.platform !== "win32" && (hasExpectedMemory || hasMemoryRuntimeRoot)) {
+    throw new Error("--expected-memory and --memory-runtime-root are only supported for win32 packages");
   }
   return {
     asarPath: parsed.asar,
     expected: parsed.expected,
     expectedMemory: parsed["expected-memory"],
+    memoryRuntimeRoot: parsed["memory-runtime-root"],
     platform: parsed.platform,
     arch: parsed.arch,
   };

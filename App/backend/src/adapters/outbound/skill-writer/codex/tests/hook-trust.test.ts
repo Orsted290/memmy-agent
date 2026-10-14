@@ -1,9 +1,9 @@
 /** Codex hook trust tests. */
-import { mkdtempSync, rmSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
-import { trustMemmyCodexHooks } from "../hook-trust.js";
+import { dirname, join } from "node:path";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { resolveCodexExecutable, trustMemmyCodexHooks } from "../hook-trust.js";
 
 let tempDir: string | undefined;
 
@@ -12,6 +12,7 @@ afterEach(() => {
     rmSync(tempDir, { recursive: true, force: true });
     tempDir = undefined;
   }
+  vi.unstubAllEnvs();
 });
 
 describe("Codex hook trust", () => {
@@ -39,6 +40,127 @@ describe("Codex hook trust", () => {
     })).rejects.toThrow("Codex did not discover every installed Memmy hook");
   });
 });
+
+describe("Codex executable resolution", () => {
+  it("uses an explicit CODEX_CLI_PATH before the other Windows candidates", () => {
+    const context = createResolverContext();
+    const explicitPath = createExecutable(join(context.tempDir, "custom-cli", "codex.exe"));
+    createExecutable(join(context.codexHomeDirectory, "plugins", ".plugin-appserver", "codex.exe"));
+    vi.stubEnv("CODEX_CLI_PATH", `"${explicitPath}"`);
+
+    const resolution = runAsWindows(() =>
+      resolveCodexExecutable(context.codexHomeDirectory, context.defaultHomeDirectory)
+    );
+
+    expect(resolution.command).toBe(explicitPath);
+    expect(resolution.checkedPaths).toEqual([explicitPath]);
+    expect(resolution.searchedPathFallback).toBe(false);
+  });
+
+  it("finds the standalone CLI under the configured CODEX_HOME", () => {
+    const context = createResolverContext();
+    const standalonePath = createExecutable(join(
+      context.codexHomeDirectory,
+      "packages",
+      "standalone",
+      "current",
+      "bin",
+      "codex.exe"
+    ));
+
+    const resolution = runAsWindows(() =>
+      resolveCodexExecutable(context.codexHomeDirectory, context.defaultHomeDirectory)
+    );
+
+    expect(resolution.command).toBe(standalonePath);
+    expect(resolution.searchedPathFallback).toBe(false);
+  });
+
+  it("uses CODEX_INSTALL_DIR as the visible bin directory", () => {
+    const context = createResolverContext();
+    const installDirectory = join(context.tempDir, "codex-install-bin");
+    const installPath = createExecutable(join(installDirectory, "codex.exe"));
+    vi.stubEnv("CODEX_INSTALL_DIR", installDirectory);
+
+    const resolution = runAsWindows(() =>
+      resolveCodexExecutable(context.codexHomeDirectory, context.defaultHomeDirectory)
+    );
+
+    expect(resolution.command).toBe(installPath);
+    expect(resolution.searchedPathFallback).toBe(false);
+  });
+
+  it("finds the newest versioned Codex desktop runtime", () => {
+    const context = createResolverContext();
+    const runtimeBinDirectory = join(context.localAppData, "OpenAI", "Codex", "bin");
+    const olderPath = createExecutable(join(runtimeBinDirectory, "version-old", "codex.exe"));
+    const newerPath = createExecutable(join(runtimeBinDirectory, "version-new", "codex.exe"));
+    const oldDate = new Date("2020-01-01T00:00:00Z");
+    const newDate = new Date("2021-01-01T00:00:00Z");
+    utimesSync(olderPath, oldDate, oldDate);
+    utimesSync(newerPath, newDate, newDate);
+
+    const resolution = runAsWindows(() =>
+      resolveCodexExecutable(context.codexHomeDirectory, context.defaultHomeDirectory)
+    );
+
+    expect(resolution.command).toBe(newerPath);
+    expect(resolution.searchedPathFallback).toBe(false);
+  });
+
+  it("returns codex.exe PATH fallback when no Windows candidate exists", () => {
+    const context = createResolverContext();
+
+    const resolution = runAsWindows(() =>
+      resolveCodexExecutable(context.codexHomeDirectory, context.defaultHomeDirectory)
+    );
+
+    expect(resolution.command).toBe("codex.exe");
+    expect(resolution.checkedPaths.length).toBeGreaterThan(0);
+    expect(resolution.searchedPathFallback).toBe(true);
+  });
+});
+
+interface CodexResolverContext {
+  tempDir: string;
+  codexHomeDirectory: string;
+  defaultHomeDirectory: string;
+  localAppData: string;
+}
+
+function createResolverContext(): CodexResolverContext {
+  tempDir = mkdtempSync(join(tmpdir(), "memmy-codex-executable-resolution-"));
+  const context = {
+    tempDir,
+    codexHomeDirectory: join(tempDir, "custom-codex-home"),
+    defaultHomeDirectory: join(tempDir, "default-user-home"),
+    localAppData: join(tempDir, "local-app-data")
+  };
+  vi.stubEnv("CODEX_CLI_PATH", "");
+  vi.stubEnv("CODEX_INSTALL_DIR", "");
+  vi.stubEnv("LOCALAPPDATA", context.localAppData);
+  return context;
+}
+
+function createExecutable(filePath: string): string {
+  mkdirSync(dirname(filePath), { recursive: true });
+  writeFileSync(filePath, "simulated codex executable");
+  chmodSync(filePath, 0o755);
+  return filePath;
+}
+
+function runAsWindows<T>(callback: () => T): T {
+  const platformDescriptor = Object.getOwnPropertyDescriptor(process, "platform");
+  if (!platformDescriptor) {
+    throw new Error("Unable to inspect process.platform descriptor");
+  }
+  Object.defineProperty(process, "platform", { ...platformDescriptor, value: "win32" });
+  try {
+    return callback();
+  } finally {
+    Object.defineProperty(process, "platform", platformDescriptor);
+  }
+}
 
 const FAKE_CODEX_APP_SERVER = String.raw`
 const readline = require("node:readline");

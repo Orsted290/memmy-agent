@@ -1,6 +1,6 @@
 /** Codex hook trust persistence through the Codex app-server protocol. */
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { accessSync, constants, statSync } from "node:fs";
+import { accessSync, constants, readdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, join, normalize } from "node:path";
 
@@ -48,6 +48,12 @@ interface CodexAppServerClient {
   request(method: string, params: Record<string, unknown>): Promise<unknown>;
   notify(method: string, params: Record<string, unknown>): void;
   close(): Promise<void>;
+}
+
+interface CodexExecutableResolution {
+  command: string;
+  checkedPaths: string[];
+  searchedPathFallback: boolean;
 }
 
 /** Trusts only the five user-level Memmy hooks that Codex discovered from hooks.json. */
@@ -154,17 +160,22 @@ function parseHookMetadata(value: unknown): CodexHookMetadata | null {
 }
 
 function createCodexAppServerClient(options: TrustMemmyCodexHooksOptions): CodexAppServerClient {
-  const executable = options.codexExecutable ?? resolveCodexExecutable(options.codexHomeDirectory);
+  const resolution = options.codexExecutable
+    ? { command: options.codexExecutable, checkedPaths: [], searchedPathFallback: false }
+    : resolveCodexExecutable(options.codexHomeDirectory);
   const args = options.appServerArguments ?? ["app-server", "--stdio"];
-  const child = spawn(executable, args, {
+  const child = spawn(resolution.command, args, {
     cwd: options.codexHomeDirectory,
     env: { ...process.env, CODEX_HOME: options.codexHomeDirectory },
     stdio: ["pipe", "pipe", "pipe"]
   });
-  return createJsonLineClient(child);
+  return createJsonLineClient(child, resolution);
 }
 
-function createJsonLineClient(child: ChildProcessWithoutNullStreams): CodexAppServerClient {
+function createJsonLineClient(
+  child: ChildProcessWithoutNullStreams,
+  executableResolution: CodexExecutableResolution
+): CodexAppServerClient {
   let nextRequestId = 1;
   let stdoutBuffer = "";
   let stderrBuffer = "";
@@ -199,7 +210,12 @@ function createJsonLineClient(child: ChildProcessWithoutNullStreams): CodexAppSe
     stderrBuffer = `${stderrBuffer}${chunk}`.slice(-MAX_STDERR_LENGTH);
   });
   child.stdin.on("error", (error) => failPending(new Error(`Codex app-server input failed: ${error.message}`)));
-  child.on("error", (error) => failPending(new Error(`Unable to start Codex app-server: ${error.message}`)));
+  child.on("error", (error) => {
+    const lookupDetails = (error as NodeJS.ErrnoException).code === "ENOENT"
+      ? formatExecutableLookupDetails(executableResolution)
+      : "";
+    failPending(new Error(`Unable to start Codex app-server: ${error.message}${lookupDetails}`));
+  });
   child.on("exit", (code, signal) => {
     if (!closing) {
       const detail = stderrBuffer.trim();
@@ -282,19 +298,105 @@ function handleResponseLine(line: string, pending: Map<number, PendingRequest>):
   request.resolve(message.result);
 }
 
-function resolveCodexExecutable(codexHomeDirectory: string): string {
+export function resolveCodexExecutable(
+  codexHomeDirectory: string,
+  defaultHomeDirectory = homedir()
+): CodexExecutableResolution {
   const executableName = process.platform === "win32" ? "codex.exe" : "codex";
-  const candidates = [join(codexHomeDirectory, "plugins", ".plugin-appserver", executableName)];
+  const candidates: string[] = [];
+  const seen = new Set<string>();
+  const addCandidate = (candidate: string | undefined): void => {
+    const path = candidate?.trim().replace(/^"(.+)"$/u, "$1");
+    if (!path) return;
+    const normalizedPath = normalize(path);
+    const key = process.platform === "win32" ? normalizedPath.toLowerCase() : normalizedPath;
+    if (seen.has(key)) return;
+    seen.add(key);
+    candidates.push(normalizedPath);
+  };
+
+  addCandidate(process.env.CODEX_CLI_PATH);
+  if (process.platform === "win32") {
+    const defaultCodexHome = join(defaultHomeDirectory, ".codex");
+    addWindowsCodexHomeCandidates(addCandidate, codexHomeDirectory, executableName);
+    if (normalize(defaultCodexHome).toLowerCase() !== normalize(codexHomeDirectory).toLowerCase()) {
+      addWindowsCodexHomeCandidates(addCandidate, defaultCodexHome, executableName);
+    }
+
+    const installDirectory = process.env.CODEX_INSTALL_DIR?.trim();
+    if (installDirectory) {
+      addCandidate(join(installDirectory, executableName));
+    }
+
+    const localAppData = process.env.LOCALAPPDATA?.trim() || join(homedir(), "AppData", "Local");
+    addCandidate(join(localAppData, "Programs", "OpenAI", "Codex", "bin", executableName));
+
+    const appRuntimeBinDirectory = join(localAppData, "OpenAI", "Codex", "bin");
+    addCandidate(join(appRuntimeBinDirectory, executableName));
+    for (const runtimeCandidate of findWindowsCodexAppRuntimeCandidates(appRuntimeBinDirectory)) {
+      addCandidate(runtimeCandidate);
+    }
+  } else {
+    addCandidate(join(codexHomeDirectory, "plugins", ".plugin-appserver", executableName));
+  }
+
   if (process.platform === "darwin") {
     // The desktop process may not inherit the shell PATH where ChatGPT exposes Codex CLI.
     const codexCliPath = join("Contents", "Resources", "codex-cli", "CodexCLI.app", "Contents", "MacOS", "codex");
-    candidates.push(
-      join("/Applications", "ChatGPT.app", codexCliPath),
-      join(homedir(), "Applications", "ChatGPT.app", codexCliPath)
-    );
+    addCandidate(join("/Applications", "ChatGPT.app", codexCliPath));
+    addCandidate(join(homedir(), "Applications", "ChatGPT.app", codexCliPath));
   }
 
-  return candidates.find(isExecutableFile) ?? executableName;
+  const checkedPaths: string[] = [];
+  for (const candidate of candidates) {
+    checkedPaths.push(candidate);
+    if (isExecutableFile(candidate)) {
+      return { command: candidate, checkedPaths, searchedPathFallback: false };
+    }
+  }
+
+  return { command: executableName, checkedPaths, searchedPathFallback: true };
+}
+
+function addWindowsCodexHomeCandidates(
+  addCandidate: (candidate: string | undefined) => void,
+  codexHomeDirectory: string,
+  executableName: string
+): void {
+  addCandidate(join(codexHomeDirectory, "plugins", ".plugin-appserver", executableName));
+  addCandidate(join(codexHomeDirectory, "packages", "standalone", "current", "bin", executableName));
+  addCandidate(join(codexHomeDirectory, "packages", "standalone", "current", executableName));
+}
+
+function findWindowsCodexAppRuntimeCandidates(binDirectory: string): string[] {
+  try {
+    return readdirSync(binDirectory, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory() && !entry.name.startsWith(".staging-"))
+      .map((entry) => join(binDirectory, entry.name, "codex.exe"))
+      .filter(isExecutableFile)
+      .sort((left, right) => getModificationTime(right) - getModificationTime(left))
+      .slice(0, 10);
+  } catch {
+    return [];
+  }
+}
+
+function getModificationTime(filePath: string): number {
+  try {
+    return statSync(filePath).mtimeMs;
+  } catch {
+    return 0;
+  }
+}
+
+function formatExecutableLookupDetails(resolution: CodexExecutableResolution): string {
+  const checkedPaths = resolution.checkedPaths.length > 0
+    ? ` Checked paths: ${resolution.checkedPaths.join("; ")}.`
+    : "";
+  const pathFallback = resolution.searchedPathFallback
+    ? ` PATH lookup for \"${resolution.command}\" was also attempted.`
+    : "";
+  return `${checkedPaths}${pathFallback}`;
 }
 
 function isExecutableFile(filePath: string): boolean {

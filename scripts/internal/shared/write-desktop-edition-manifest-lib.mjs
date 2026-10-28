@@ -59,8 +59,11 @@ export async function writeDesktopEditionManifest({
   if (!new Set(["signed", "unsigned"]).has(signing)) {
     throw new Error("Invalid desktop signing identity");
   }
-  if (localTestProfile !== undefined && (localTestProfile !== "signed-local" || signing !== "signed")) {
-    throw new Error("The signed-local test profile marker requires a signed macOS package");
+  if (localTestProfile !== undefined && !(
+    localTestProfile === "signed-local" && signing === "signed" ||
+    localTestProfile === "windows-local" && signing === "unsigned"
+  )) {
+    throw new Error("The signed-local marker requires a signed package; the windows-local marker requires an unsigned package");
   }
 
   const manifest = {
@@ -83,7 +86,7 @@ export function parseDesktopManifestArgs(args) {
     const value = args[index + 1];
     if (!flag?.startsWith("--") || value === undefined) {
       throw new Error(
-        "Usage: write-desktop-edition-manifest.mjs --output <path> --edition <cn|intl> --account-channel <phone|email> --signing <signed|unsigned> [--local-test-profile signed-local]",
+        "Usage: write-desktop-edition-manifest.mjs --output <path> --edition <cn|intl> --account-channel <phone|email> --signing <signed|unsigned> [--local-test-profile signed-local|windows-local]",
       );
     }
     const key = flag.slice(2).replace(/-([a-z])/g, (_, letter) => letter.toUpperCase());

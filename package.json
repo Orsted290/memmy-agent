@@ -47,6 +47,7 @@
     "package:win:x64:unsigned": "bash scripts/package-win.sh --version $npm_package_version --arch x64 --edition cn --sign unsigned",
     "package:win:x64:cn:unsigned": "bash scripts/package-win.sh --version $npm_package_version --arch x64 --edition cn --sign unsigned",
     "package:win:x64:cn:signed": "bash scripts/package-win.sh --version $npm_package_version --arch x64 --edition cn --sign signed",
+    "package:win:x64:codex-acceptance": "MEMMY_WINDOWS_CODEX_ACCEPTANCE=1 bash scripts/package-win.sh --version $npm_package_version --arch x64 --edition cn --sign unsigned",
     "package:win:x64:intl:unsigned": "bash scripts/package-win.sh --version $npm_package_version --arch x64 --edition intl --sign unsigned",
     "package:win:x64:intl:signed": "bash scripts/package-win.sh --version $npm_package_version --arch x64 --edition intl --sign signed",
     "worker:run": "npm run memory:worker:run",

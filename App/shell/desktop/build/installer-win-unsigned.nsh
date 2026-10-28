@@ -106,11 +106,23 @@ Var pid
   Var MemmyLaunchResult
   Var MemmyLaunchStartTick
   Var MemmyLaunchElapsedMs
+  Var MemmyCodexAcceptanceBuild
 
   ; Completed external-v1 installations can use electron-builder's standard NSIS upgrade.
   ; Legacy or uncertain layouts still relay through a copy outside $INSTDIR so old install-local
   ; data survives the uninstall. The relayed child carries an explicit marker to prevent recursion.
   !macro customInit
+  !ifdef MEMMY_CODEX_ACCEPTANCE_BUILD
+    ; This installer has its own app identity and only exercises the packaged app.
+    ; Never inspect or migrate the user's regular Memmy installation or data.
+    StrCpy $MemmyCodexAcceptanceBuild "1"
+    StrCpy $MemmyDirectMigrationPrepared "0"
+    StrCpy $MemmyStandardUpgradeSafe "1"
+    StrCpy $MemmyPreparedInstallDir ""
+    StrCpy $MemmyUpgradeRoute "standard"
+    StrCpy $MemmyFinalDirectoryReady "1"
+    Goto memmy_custom_init_done
+  !endif
     StrCpy $MemmyDirectMigrationPrepared "0"
     StrCpy $MemmyStandardUpgradeSafe "0"
     StrCpy $MemmyPreparedInstallDir ""
@@ -242,12 +254,16 @@ Var pid
 
   !macro customInstall
     WriteRegStr SHELL_CONTEXT "${UNINSTALL_REGISTRY_KEY}" "InstallLocation" "$INSTDIR"
+    StrCmp $MemmyCodexAcceptanceBuild "1" memmy_custom_install_skip_host_setup
     Call MemmyAddCliToUserPath
     Call MemmyInstallLaunchProxy
     !insertmacro MemmyPointShortcutsToLaunchProxy
+  memmy_custom_install_skip_host_setup:
+    StrCmp $MemmyCodexAcceptanceBuild "1" memmy_custom_install_done
     Call MemmyClearRelayedUpgradeMarkers
     ; Release the direct-install barrier only after every install-time mutation is complete.
     Call MemmyCompleteDirectDataMigration
+  memmy_custom_install_done:
   !macroend
 !endif
 
@@ -1102,8 +1118,10 @@ Function un.MemmyRemoveCliFromUserPath
   Push ""
   Call un.MemmyRemovePathSegment
   Pop $1
-  WriteRegExpandStr HKCU "Environment" "Path" "$1"
-  System::Call 'user32::SendMessageTimeout(i 0xffff, i ${MEMMY_WM_SETTINGCHANGE}, i 0, t "Environment", i 0x0002, i 5000, *i .r0)'
+  !ifndef MEMMY_CODEX_ACCEPTANCE_BUILD
+    WriteRegExpandStr HKCU "Environment" "Path" "$1"
+    System::Call 'user32::SendMessageTimeout(i 0xffff, i ${MEMMY_WM_SETTINGCHANGE}, i 0, t "Environment", i 0x0002, i 5000, *i .r0)'
+  !endif
 
   memmy_remove_cli_done:
 FunctionEnd
@@ -1188,6 +1206,7 @@ Function un.MemmyRemoveLaunchProxy
     Pop $R0
     ; Electron registers app.setLoginItemSettings under this per-user Run value.
     ; The keep-shortcuts upgrade branch returns above so the user's preference survives updates.
+  !ifndef MEMMY_CODEX_ACCEPTANCE_BUILD
     DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "${APP_ID}"
     ClearErrors
     ReadRegStr $0 SHELL_CONTEXT "Software\${APP_GUID}" "ShortcutName"
@@ -1199,5 +1218,6 @@ Function un.MemmyRemoveLaunchProxy
     Delete "$DESKTOP\${SHORTCUT_NAME}.lnk"
     ClearErrors
     RMDir /r "$LOCALAPPDATA\Memmy\launcher"
+  !endif
 FunctionEnd
 !endif

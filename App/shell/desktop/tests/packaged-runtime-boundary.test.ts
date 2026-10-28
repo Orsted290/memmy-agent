@@ -37,6 +37,7 @@ const createMemoryRuntimeManifestPath = fileURLToPath(
 );
 const winUnsignedBuilderPath = fileURLToPath(new URL("../electron-builder.win.unsigned.yml", import.meta.url));
 const winUnsignedInstallerIncludePath = fileURLToPath(new URL("../build/installer-win-unsigned.nsh", import.meta.url));
+const winCodexAcceptanceInstallerIncludePath = fileURLToPath(new URL("../build/installer-win-codex-acceptance.nsh", import.meta.url));
 const winStandardUpgradeCheckPath = fileURLToPath(new URL("../build/MemmyWindowsStandardUpgradeCheck.ps1", import.meta.url));
 const winUpgradeRelayScriptPath = fileURLToPath(new URL("../build/MemmyWindowsUpgradeRelay.ps1", import.meta.url));
 const winUpgradeRecoveryScriptPath = fileURLToPath(new URL("../build/MemmyWindowsUpgradeRecovery.ps1", import.meta.url));
@@ -501,9 +502,9 @@ describe("desktop packaged runtime boundaries", () => {
     const source = readFileSync(mainSourcePath, "utf8");
 
     expect(source).toContain('app.setName("Memmy");');
-    expect(source).toContain("windowsDataLayout = resolveWindowsDataLayout({");
-    expect(source).toContain("const userDataPath = windowsDataLayout?.userDataPath ?? resolveDesktopUserDataPath(edition);");
-    expect(source).toContain("const memmyHome = windowsDataLayout?.runtimeHomePath ?? resolveDesktopRuntimeHomePath(edition);");
+    expect(source).toContain("windowsDataLayout = localTestProfile ? null : resolveWindowsDataLayout({");
+    expect(source).toContain("const userDataPath = localTestProfile?.userData ?? windowsDataLayout?.userDataPath ?? resolveDesktopUserDataPath(edition);");
+    expect(source).toContain("const memmyHome = localTestProfile?.runtimeHome ?? windowsDataLayout?.runtimeHomePath ?? resolveDesktopRuntimeHomePath(edition);");
     expect(source).toContain('app.setPath("userData", userDataPath);');
     expect(source).not.toContain('return join(dirname(process.execPath), "data");');
     expect(source).toContain('windowsDataLayout?.updatesPath ?? join(app.getPath("userData"), "updates")');
@@ -918,6 +919,7 @@ describe("desktop packaged runtime boundaries", () => {
     expect(signedBuilderConfig).toContain("createStartMenuShortcut: true");
     expect(unsignedBuilderConfig).toContain("createStartMenuShortcut: true");
     expect(includeSource).toContain("!macro customInstall");
+    expect(includeSource).toContain("!ifndef MEMMY_CODEX_ACCEPTANCE_BUILD");
     expect(includeSource).toContain("Call MemmyAddCliToUserPath");
     expect(includeSource).toContain("Call MemmyInstallLaunchProxy");
     expect(includeSource).toContain("!insertmacro MemmyPointShortcutsToLaunchProxy");
@@ -1029,6 +1031,27 @@ describe("desktop packaged runtime boundaries", () => {
     expect(removeLaunchProxyIndex).toBeGreaterThan(keepLaunchProxyIndex);
     expect(includeSource.slice(keepLaunchProxyIndex, removeLaunchProxyIndex)).toContain("Return");
     expect(removeLoginItemIndex).toBeGreaterThan(removeLaunchProxyIndex);
+  });
+
+  it("isolates the Windows Codex acceptance installer from the host registry and shortcuts", () => {
+    const includeSource = readFileSync(winUnsignedInstallerIncludePath, "utf8");
+    const acceptanceInclude = readFileSync(winCodexAcceptanceInstallerIncludePath, "utf8");
+    const packageSource = readFileSync(packageWinX64Path, "utf8");
+
+    expect(acceptanceInclude).toContain("!define MEMMY_CODEX_ACCEPTANCE_BUILD");
+    expect(acceptanceInclude).toContain('!include "${BUILD_RESOURCES_DIR}\\installer-win-unsigned.nsh"');
+    expect(includeSource).toContain('StrCmp $MemmyCodexAcceptanceBuild "1" memmy_custom_install_skip_host_setup');
+    expect(includeSource).toContain("Call MemmyAddCliToUserPath");
+    expect(includeSource).toContain("Call un.MemmyRemoveCliFromUserPath\n    Call un.MemmyRemoveLaunchProxy");
+    expect(includeSource).toContain('!ifndef MEMMY_CODEX_ACCEPTANCE_BUILD\n    WriteRegExpandStr HKCU "Environment" "Path"');
+    expect(includeSource).toContain('!ifndef MEMMY_CODEX_ACCEPTANCE_BUILD\n    DeleteRegValue HKCU "Software\\Microsoft\\Windows\\CurrentVersion\\Run"');
+    expect(includeSource).toContain("!ifdef MEMMY_CODEX_ACCEPTANCE_BUILD\n    ; This installer has its own app identity");
+    expect(includeSource).toContain('StrCpy $MemmyCodexAcceptanceBuild "1"');
+    expect(includeSource).toContain('StrCmp $MemmyCodexAcceptanceBuild "1" memmy_custom_install_done');
+    expect(packageSource).toContain("--config.appId=cn.memtensor.memmy.codex-acceptance");
+    expect(packageSource).toContain('--config.nsis.include="$DESKTOP_DIR/build/installer-win-codex-acceptance.nsh"');
+    expect(packageSource).toContain("--config.nsis.createDesktopShortcut=false");
+    expect(packageSource).toContain("--config.nsis.createStartMenuShortcut=false");
   });
 
   it("exports Memory through the standalone HTTP service and desktop save dialog", () => {
@@ -1149,8 +1172,8 @@ describe("desktop packaged runtime boundaries", () => {
     expect(packageSource).not.toContain(['create_cli_launcher "$CLI_BIN_DIR/', 'memmy-agent', '"'].join(""));
     expect(packageSource).not.toContain(['ln -sf "$SCRIPT_DIR/', 'memmy-agent', '"'].join(""));
     expect(windowsPackageSource).toContain('create_windows_cli_launcher "$CLI_BIN_DIR/memmy.cmd"');
-    expect(windowsPackageSource).toContain('require_packaged_runtime_file "$DESKTOP_DIR/release/win-unpacked/resources/cli/memmy-memory.cmd"');
-    expect(windowsPackageSource).toContain('require_packaged_runtime_file "$DESKTOP_DIR/release/win-unpacked/resources/cli/memmy.cmd"');
+    expect(windowsPackageSource).toContain('require_packaged_runtime_file "$PACKAGE_OUTPUT_DIR/win-unpacked/resources/cli/memmy-memory.cmd"');
+    expect(windowsPackageSource).toContain('require_packaged_runtime_file "$PACKAGE_OUTPUT_DIR/win-unpacked/resources/cli/memmy.cmd"');
     expect(windowsPackageSource).toContain('for %%I in ("%RESOURCES_DIR%\\..") do set "APP_DIR=%%~fI"');
     expect(windowsPackageSource).toContain('set "APP_EXEC=%APP_DIR%\\Memmy.exe"');
     expect(windowsPackageSource).not.toContain('set "APP_EXEC=%RESOURCES_DIR%\\Memmy.exe"');
@@ -1752,6 +1775,7 @@ describe("desktop packaged runtime boundaries", () => {
     expect(scripts["package:win:x64:unsigned"]).toBe("bash scripts/package-win.sh --version $npm_package_version --arch x64 --edition cn --sign unsigned");
     expect(scripts["package:win:x64:cn:signed"]).toBe("bash scripts/package-win.sh --version $npm_package_version --arch x64 --edition cn --sign signed");
     expect(scripts["package:win:x64:cn:unsigned"]).toBe("bash scripts/package-win.sh --version $npm_package_version --arch x64 --edition cn --sign unsigned");
+    expect(scripts["package:win:x64:codex-acceptance"]).toBe("MEMMY_WINDOWS_CODEX_ACCEPTANCE=1 bash scripts/package-win.sh --version $npm_package_version --arch x64 --edition cn --sign unsigned");
     expect(scripts["package:win:x64:intl:signed"]).toBe("bash scripts/package-win.sh --version $npm_package_version --arch x64 --edition intl --sign signed");
     expect(scripts["package:win:x64:intl:unsigned"]).toBe("bash scripts/package-win.sh --version $npm_package_version --arch x64 --edition intl --sign unsigned");
   });
@@ -1970,8 +1994,10 @@ describe("desktop packaged runtime boundaries", () => {
     expect(source).toContain("desktop-edition.json");
     expect(source).toContain("write-desktop-edition-manifest.mjs");
     expect(source).toContain('--signing "$PACKAGE_SIGNING"');
-    expect(source).toContain('FINAL_EXE="$DESKTOP_DIR/release/Memmy-$DESKTOP_VERSION-win32-$PACKAGE_ARCH-$PACKAGE_EDITION-$PACKAGE_SIGNING.exe"');
-    expect(source).toContain('ARTIFACT_NAME="Memmy-$DESKTOP_VERSION-win32-$PACKAGE_ARCH-$PACKAGE_EDITION-$PACKAGE_SIGNING.\\${ext}"');
+    expect(source).toContain('PACKAGE_OUTPUT_DIR="$DESKTOP_DIR/release"');
+    expect(source).toContain('PACKAGE_OUTPUT_DIR="$DESKTOP_DIR/release/codex-acceptance"');
+    expect(source).toContain('FINAL_EXE="$PACKAGE_OUTPUT_DIR/Memmy-$DESKTOP_VERSION-win32-$PACKAGE_ARCH-$PACKAGE_EDITION-$PACKAGE_SIGNING$CODEX_ACCEPTANCE_SUFFIX.exe"');
+    expect(source).toContain('ARTIFACT_NAME="Memmy-$DESKTOP_VERSION-win32-$PACKAGE_ARCH-$PACKAGE_EDITION-$PACKAGE_SIGNING$CODEX_ACCEPTANCE_SUFFIX.\\${ext}"');
     expect(source).toContain('BUILDER_ARGS+=(--config.extraMetadata.version="$DESKTOP_VERSION")');
     expect(source).toContain('npx electron-builder "${BUILDER_ARGS[@]}" --win nsis --x64 "$@" --config.artifactName="$ARTIFACT_NAME"');
     expect(source).not.toContain("use_final_artifact_name");

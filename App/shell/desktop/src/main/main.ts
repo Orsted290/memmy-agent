@@ -955,7 +955,7 @@ function configureAppIdentity(): void {
     app.setPath('appData', localTestProfile.appData);
   }
   const edition = resolveCurrentDesktopEdition();
-  windowsDataLayout = resolveWindowsDataLayout({
+  windowsDataLayout = localTestProfile ? null : resolveWindowsDataLayout({
     platform: process.platform,
     isPackaged: app.isPackaged,
     isWindowsStore: Boolean((process as NodeJS.Process & { windowsStore?: boolean }).windowsStore),
@@ -972,8 +972,8 @@ function configureAppIdentity(): void {
       throw error;
     }
   }
-  const userDataPath = windowsDataLayout?.userDataPath ?? resolveDesktopUserDataPath(edition);
-  const memmyHome = windowsDataLayout?.runtimeHomePath ?? resolveDesktopRuntimeHomePath(edition);
+  const userDataPath = localTestProfile?.userData ?? windowsDataLayout?.userDataPath ?? resolveDesktopUserDataPath(edition);
+  const memmyHome = localTestProfile?.runtimeHome ?? windowsDataLayout?.runtimeHomePath ?? resolveDesktopRuntimeHomePath(edition);
   if (process.platform === "win32") {
     app.setAppUserModelId(WINDOWS_APP_USER_MODEL_ID);
   }

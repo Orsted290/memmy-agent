@@ -18,6 +18,7 @@ const prepare = (root: string, overrides: Record<string, unknown> = {}) => prepa
   platform: 'darwin',
   isPackaged: true,
   env: { HOME: join(root, 'home') },
+  temporaryDirectory: tmpdir(),
   ...overrides,
 });
 
@@ -69,7 +70,54 @@ describe('local packaged test profile', () => {
       { manifest: null },
       { platform: 'win32' },
       { isPackaged: false },
-    ]) expect(() => prepare(root, overrides)).toThrow('requires an unsigned macOS test package or a marked signed local package');
+    ]) expect(() => prepare(root, overrides)).toThrow('requires an unsigned macOS package, a Windows Codex acceptance package');
+  });
+
+  it('keeps the marked Windows Codex acceptance package and its app paths inside the disposable profile', () => {
+    const root = freshRoot();
+    const profile = prepare(root, {
+      manifest: '{"signing":"unsigned","localTestProfile":"windows-local"}',
+      platform: 'win32',
+      env: { USERPROFILE: join(root, 'home') },
+    });
+    expect(profile).not.toBeNull();
+    if (!profile) return;
+
+    const env: NodeJS.ProcessEnv = {
+      USERPROFILE: join(root, 'home'),
+      HOME: join(root, 'home'),
+      APPDATA: 'C:\\Users\\real\\AppData\\Roaming',
+      LOCALAPPDATA: 'C:\\Users\\real\\AppData\\Local',
+      CODEX_HOME: 'C:\\Users\\real\\.codex',
+    };
+    applyLocalTestProfileEnvironment(profile, env);
+
+    expect(profile.platform).toBe('win32');
+    expect(env.USERPROFILE).toBe(profile.home);
+    expect(env.APPDATA).toBe(profile.appData);
+    expect(env.LOCALAPPDATA).toBe(profile.localAppData);
+    expect(env.CODEX_HOME).toBe(join(profile.home, '.codex'));
+    for (const path of [profile.home, profile.appData, profile.localAppData, profile.userData,
+      profile.runtimeHome, profile.memoryDatabase, env.CODEX_HOME, env.TEMP, env.TMP]) {
+      expect(relative(profile.root, path!)).not.toMatch(/^\.\./);
+    }
+  });
+
+  it('fails closed when the marked Windows acceptance package is launched without isolation', () => {
+    expect(() => prepareLocalTestProfile({
+      manifest: '{"signing":"unsigned","localTestProfile":"windows-local"}',
+      platform: 'win32',
+      isPackaged: true,
+      env: {},
+      temporaryDirectory: tmpdir(),
+    })).toThrow('requires MEMMY_TEST_PROFILE_ROOT');
+
+    const root = freshRoot();
+    expect(() => prepare(root, {
+      manifest: '{"signing":"unsigned"}',
+      platform: 'win32',
+      env: { USERPROFILE: join(root, 'home') },
+    })).toThrow('requires an unsigned macOS package');
   });
 
   it('opens a marked signed local build only with the explicit switch and release signing Team ID', () => {

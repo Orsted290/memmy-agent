@@ -2,12 +2,14 @@ import { createHash, randomBytes } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { existsSync, lstatSync, mkdirSync, realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { isAbsolute, join, relative, resolve, sep, win32 } from 'node:path';
 
 export type LocalTestProfile = {
+  platform: NodeJS.Platform;
   root: string;
   home: string;
   appData: string;
+  localAppData: string;
   userData: string;
   sessionData: string;
   logs: string;
@@ -49,19 +51,25 @@ export function prepareLocalTestProfile(options: {
   let manifest: { signing?: unknown; localTestProfile?: unknown } = {};
   try { manifest = JSON.parse(options.manifest ?? '{}') as typeof manifest; } catch { /* Fail closed below. */ }
   const signedLocalBuild = manifest?.signing === 'signed' && manifest.localTestProfile === 'signed-local';
+  const windowsLocalBuild = options.platform === 'win32' && options.isPackaged
+    && manifest?.signing === 'unsigned' && manifest.localTestProfile === 'windows-local';
   if (signedLocalBuild && (!requestedRoot || options.env.MEMMY_ENABLE_SIGNED_TEST_PROFILE !== '1')) {
     throw new Error('Signed local test build requires MEMMY_TEST_PROFILE_ROOT and MEMMY_ENABLE_SIGNED_TEST_PROFILE=1');
+  }
+  if (windowsLocalBuild && !requestedRoot) {
+    throw new Error('Windows Codex acceptance build requires MEMMY_TEST_PROFILE_ROOT');
   }
   if (!requestedRoot) {
     if (options.env.MEMMY_ENABLE_SIGNED_TEST_PROFILE) throw new Error('Signed local test profile requires MEMMY_TEST_PROFILE_ROOT');
     return null;
   }
-  if (options.platform !== 'darwin' || !options.isPackaged || !(
-    manifest?.signing === 'unsigned' && !manifest.localTestProfile ||
-    signedLocalBuild && options.env.MEMMY_ENABLE_SIGNED_TEST_PROFILE === '1'
-      && options.signedTeamIdentifier === RELEASE_MAC_TEAM_ID
-  )) {
-    throw new Error('MEMMY_TEST_PROFILE_ROOT requires an unsigned macOS test package or a marked signed local package with the release Team ID');
+  const unsignedMacBuild = options.platform === 'darwin' && options.isPackaged
+    && manifest?.signing === 'unsigned' && !manifest.localTestProfile;
+  const trustedSignedMacBuild = options.platform === 'darwin' && options.isPackaged
+    && signedLocalBuild && options.env.MEMMY_ENABLE_SIGNED_TEST_PROFILE === '1'
+    && options.signedTeamIdentifier === RELEASE_MAC_TEAM_ID;
+  if (!unsignedMacBuild && !trustedSignedMacBuild && !windowsLocalBuild) {
+    throw new Error('MEMMY_TEST_PROFILE_ROOT requires an unsigned macOS package, a Windows Codex acceptance package, or a marked signed macOS package with the release Team ID');
   }
   if (!isAbsolute(requestedRoot)) throw new Error('MEMMY_TEST_PROFILE_ROOT must be an absolute temporary directory');
 
@@ -76,8 +84,10 @@ export function prepareLocalTestProfile(options: {
     throw new Error('MEMMY_TEST_PROFILE_ROOT must be a direct child of a temporary directory');
   }
   const expectedHome = join(candidate, 'home');
-  if (!options.env.HOME || resolve(options.env.HOME) !== expectedHome) {
-    throw new Error('Launch the test build with HOME=<MEMMY_TEST_PROFILE_ROOT>/home before Electron starts');
+  const requestedHome = options.platform === 'win32' ? options.env.USERPROFILE : options.env.HOME;
+  if (!requestedHome || resolve(requestedHome) !== expectedHome) {
+    const homeVariable = options.platform === 'win32' ? 'USERPROFILE' : 'HOME';
+    throw new Error(`Launch the test build with ${homeVariable}=<MEMMY_TEST_PROFILE_ROOT>/home before Electron starts`);
   }
   if (lstatSync(candidate, { throwIfNoEntry: false })?.isSymbolicLink()) {
     throw new Error('MEMMY_TEST_PROFILE_ROOT cannot be a symbolic link');
@@ -91,7 +101,8 @@ export function prepareLocalTestProfile(options: {
   const home = join(root, 'home');
   const appData = join(root, 'app-data');
   const profile: LocalTestProfile = {
-    root, home, appData,
+    platform: options.platform,
+    root, home, appData, localAppData: join(root, 'local-app-data'),
     userData: join(appData, 'Memmy'),
     sessionData: join(root, 'session-data'),
     logs: join(root, 'logs'),
@@ -105,7 +116,7 @@ export function prepareLocalTestProfile(options: {
     portBase: 30000 + (createHash('sha256').update(root).digest().readUInt16BE(0) % 10000) * 3,
   };
   for (const directory of [profile.home, profile.appData, profile.userData, profile.sessionData,
-    profile.logs, profile.temp, profile.crashDumps, profile.downloads, profile.documents, profile.runtimeHome,
+    profile.localAppData, profile.logs, profile.temp, profile.crashDumps, profile.downloads, profile.documents, profile.runtimeHome,
     profile.workspace, join(profile.runtimeHome, 'memory-service')]) {
     mkdirSync(directory, { recursive: true, mode: 0o700 });
     if (!within(root, realpathSync(directory))) {
@@ -123,6 +134,16 @@ export function prepareLocalTestProfile(options: {
 
 export function applyLocalTestProfileEnvironment(profile: LocalTestProfile, env: NodeJS.ProcessEnv): void {
   env.HOME = profile.home;
+  if (profile.platform === 'win32') {
+    env.USERPROFILE = profile.home;
+    const drive = win32.parse(profile.home).root;
+    if (drive) {
+      env.HOMEDRIVE = drive.slice(0, 2);
+      env.HOMEPATH = profile.home.slice(drive.length);
+    }
+    env.APPDATA = profile.appData;
+    env.LOCALAPPDATA = profile.localAppData;
+  }
   env.MEMMY_TEST_PROFILE_ROOT = profile.root;
   env.MEMMY_TEST_PORT_BASE = String(profile.portBase);
   env.MEMMY_HOME = profile.runtimeHome;

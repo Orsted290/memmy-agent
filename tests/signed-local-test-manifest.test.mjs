@@ -17,10 +17,18 @@ test('signed local marker is present only in a signed test build manifest', asyn
     assert.equal(JSON.parse(readFileSync(base.output, 'utf8')).localTestProfile, 'signed-local');
     await assert.rejects(
       writeDesktopEditionManifest({ ...base, signing: 'unsigned', localTestProfile: 'signed-local' }),
-      /requires a signed macOS package/,
+      /signed-local marker requires a signed package/,
     );
     assert.equal(parseDesktopManifestArgs(['--output', base.output, '--edition', 'cn', '--account-channel', 'phone',
       '--signing', 'signed', '--local-test-profile', 'signed-local']).localTestProfile, 'signed-local');
+    const windowsLocal = await writeDesktopEditionManifest({
+      ...base, signing: 'unsigned', localTestProfile: 'windows-local',
+    });
+    assert.equal(windowsLocal.localTestProfile, 'windows-local');
+    await assert.rejects(
+      writeDesktopEditionManifest({ ...base, signing: 'signed', localTestProfile: 'windows-local' }),
+      /windows-local marker requires an unsigned package/,
+    );
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

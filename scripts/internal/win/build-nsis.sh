@@ -117,6 +117,20 @@ else
   PACKAGE_SIGNING="signed"
 fi
 
+CODEX_ACCEPTANCE_SUFFIX=""
+PACKAGE_OUTPUT_DIR="$DESKTOP_DIR/release"
+if [ "${MEMMY_WINDOWS_CODEX_ACCEPTANCE:-}" = "1" ]; then
+  if [ "$PACKAGE_SIGNING" != "unsigned" ]; then
+    echo "The Windows Codex acceptance package must be unsigned." >&2
+    exit 1
+  fi
+  CODEX_ACCEPTANCE_SUFFIX="-codex-acceptance"
+  PACKAGE_OUTPUT_DIR="$DESKTOP_DIR/release/codex-acceptance"
+elif [ -n "${MEMMY_WINDOWS_CODEX_ACCEPTANCE:-}" ]; then
+  echo "MEMMY_WINDOWS_CODEX_ACCEPTANCE must be unset or 1." >&2
+  exit 1
+fi
+
 case "${MEMMY_ACCOUNT_CHANNEL:-phone}" in
   email)
     PACKAGE_EDITION="intl"
@@ -130,9 +144,9 @@ case "${MEMMY_ACCOUNT_CHANNEL:-phone}" in
     ;;
 esac
 
-FINAL_EXE="$DESKTOP_DIR/release/Memmy-$DESKTOP_VERSION-win32-$PACKAGE_ARCH-$PACKAGE_EDITION-$PACKAGE_SIGNING.exe"
-ARTIFACT_NAME="Memmy-$DESKTOP_VERSION-win32-$PACKAGE_ARCH-$PACKAGE_EDITION-$PACKAGE_SIGNING.\${ext}"
-package_log_init "win-$DESKTOP_VERSION-$PACKAGE_ARCH-$PACKAGE_EDITION-$PACKAGE_SIGNING" "$DESKTOP_DIR/release/logs"
+FINAL_EXE="$PACKAGE_OUTPUT_DIR/Memmy-$DESKTOP_VERSION-win32-$PACKAGE_ARCH-$PACKAGE_EDITION-$PACKAGE_SIGNING$CODEX_ACCEPTANCE_SUFFIX.exe"
+ARTIFACT_NAME="Memmy-$DESKTOP_VERSION-win32-$PACKAGE_ARCH-$PACKAGE_EDITION-$PACKAGE_SIGNING$CODEX_ACCEPTANCE_SUFFIX.\${ext}"
+package_log_init "win-$DESKTOP_VERSION-$PACKAGE_ARCH-$PACKAGE_EDITION-$PACKAGE_SIGNING$CODEX_ACCEPTANCE_SUFFIX" "$DESKTOP_DIR/release/logs"
 package_install_error_trap
 package_log "Windows package context: version=$DESKTOP_VERSION arch=$PACKAGE_ARCH edition=$PACKAGE_EDITION signing=$PACKAGE_SIGNING installer=$FINAL_EXE"
 
@@ -321,6 +335,7 @@ create_memory_runtime_manifest() {
 write_desktop_edition_manifest() {
   local account_channel="${MEMMY_ACCOUNT_CHANNEL:-phone}"
   local edition="cn"
+  local -a manifest_args
 
   case "$account_channel" in
     email)
@@ -335,11 +350,16 @@ write_desktop_edition_manifest() {
       ;;
   esac
 
-  node "$ROOT_DIR/scripts/internal/shared/write-desktop-edition-manifest.mjs" \
-    --output "$DESKTOP_DIR/dist/main/desktop-edition.json" \
-    --edition "$edition" \
-    --account-channel "$account_channel" \
+  manifest_args=(
+    --output "$DESKTOP_DIR/dist/main/desktop-edition.json"
+    --edition "$edition"
+    --account-channel "$account_channel"
     --signing "$PACKAGE_SIGNING"
+  )
+  if [ "${MEMMY_WINDOWS_CODEX_ACCEPTANCE:-}" = "1" ]; then
+    manifest_args+=(--local-test-profile windows-local)
+  fi
+  node "$ROOT_DIR/scripts/internal/shared/write-desktop-edition-manifest.mjs" "${manifest_args[@]}"
 }
 
 create_memory_runtime_lock() {
@@ -645,24 +665,24 @@ verify_pruned_windows_runtime() {
 }
 
 verify_packaged_windows_unpacked_artifacts() {
-  local unpacked_runtime="$DESKTOP_DIR/release/win-unpacked/resources/app.asar.unpacked/dist/runtime"
-  local packaged_memory_runtime="$DESKTOP_DIR/release/win-unpacked/resources/memory-runtime"
+  local unpacked_runtime="$PACKAGE_OUTPUT_DIR/win-unpacked/resources/app.asar.unpacked/dist/runtime"
+  local packaged_memory_runtime="$PACKAGE_OUTPUT_DIR/win-unpacked/resources/memory-runtime"
   local packaged_agent_source_core="$packaged_memory_runtime/node_modules/@memmy/agent-source-core"
-  local packaged_embedding_model="$DESKTOP_DIR/release/win-unpacked/resources/embedding-models/$EMBEDDING_MODEL_ID"
+  local packaged_embedding_model="$PACKAGE_OUTPUT_DIR/win-unpacked/resources/embedding-models/$EMBEDDING_MODEL_ID"
 
-  require_packaged_runtime_file "$DESKTOP_DIR/release/win-unpacked/resources/app.asar"
+  require_packaged_runtime_file "$PACKAGE_OUTPUT_DIR/win-unpacked/resources/app.asar"
   node "$ROOT_DIR/scripts/internal/shared/verify-browser-extension.mjs" \
     "$(to_node_readable_path "$DESKTOP_DIR/extensions/memmy-browser")" \
-    "$(to_node_readable_path "$DESKTOP_DIR/release/win-unpacked/resources/browser-extension")"
-  require_packaged_runtime_file "$DESKTOP_DIR/release/win-unpacked/resources/cli/memmy-memory.cmd"
-  require_packaged_runtime_file "$DESKTOP_DIR/release/win-unpacked/resources/cli/memmy.cmd"
+    "$(to_node_readable_path "$PACKAGE_OUTPUT_DIR/win-unpacked/resources/browser-extension")"
+  require_packaged_runtime_file "$PACKAGE_OUTPUT_DIR/win-unpacked/resources/cli/memmy-memory.cmd"
+  require_packaged_runtime_file "$PACKAGE_OUTPUT_DIR/win-unpacked/resources/cli/memmy.cmd"
   require_packaged_runtime_file "$packaged_memory_runtime/dist/src/cli/index.js"
   if ! grep -Fq 'set "ENTRY=%RESOURCES_DIR%\memory-runtime\dist\src\cli\index.js"' \
-    "$DESKTOP_DIR/release/win-unpacked/resources/cli/memmy-memory.cmd"; then
+    "$PACKAGE_OUTPUT_DIR/win-unpacked/resources/cli/memmy-memory.cmd"; then
     echo "Packaged Memory CLI launcher points outside the external Memory runtime." >&2
     exit 1
   fi
-  verify_packaged_runtime_config_boundary "$DESKTOP_DIR/release/win-unpacked/resources"
+  verify_packaged_runtime_config_boundary "$PACKAGE_OUTPUT_DIR/win-unpacked/resources"
   require_packaged_runtime_file "$packaged_agent_source_core/package.json"
   require_packaged_runtime_file "$packaged_agent_source_core/dist/src/index.js"
   for manifest in package.json package-lock.json memory-runtime.json; do
@@ -1008,14 +1028,22 @@ fi
 if [ "${#WINDOWS_SIGNING_BUILDER_ARGS[@]}" -gt 0 ]; then
   BUILDER_ARGS+=("${WINDOWS_SIGNING_BUILDER_ARGS[@]}")
 fi
+if [ "${MEMMY_WINDOWS_CODEX_ACCEPTANCE:-}" = "1" ]; then
+  # Use a distinct Windows installer identity and skip user-wide CLI/shortcut registry changes.
+  BUILDER_ARGS+=(--config.appId=cn.memtensor.memmy.codex-acceptance)
+  BUILDER_ARGS+=(--config.directories.output="$PACKAGE_OUTPUT_DIR")
+  BUILDER_ARGS+=(--config.nsis.include="$DESKTOP_DIR/build/installer-win-codex-acceptance.nsh")
+  BUILDER_ARGS+=(--config.nsis.createDesktopShortcut=false)
+  BUILDER_ARGS+=(--config.nsis.createStartMenuShortcut=false)
+fi
 
 npx electron-builder "${BUILDER_ARGS[@]}" --win nsis --x64 "$@" --config.artifactName="$ARTIFACT_NAME"
 package_step_start "Verify packaged Windows app artifacts"
 verify_packaged_windows_unpacked_artifacts
 node "$ROOT_DIR/scripts/internal/win/verify-desktop-sqlite-vec.mjs" packaged \
   "$(to_node_readable_path "$ROOT_DIR/App/backend/package.json")" \
-  "$(to_node_readable_path "$DESKTOP_DIR/release/win-unpacked/resources/app.asar")" \
-  "$(to_node_readable_path "$DESKTOP_DIR/release/win-unpacked/resources")"
+  "$(to_node_readable_path "$PACKAGE_OUTPUT_DIR/win-unpacked/resources/app.asar")" \
+  "$(to_node_readable_path "$PACKAGE_OUTPUT_DIR/win-unpacked/resources")"
 
 if [ ! -f "$FINAL_EXE" ]; then
   echo "Packaging completed without the expected installer: $FINAL_EXE" >&2
